@@ -241,7 +241,7 @@ RTC::ReturnCode_t SoftBodyController::onExecute(RTC::UniqueId ec_id)
 
       // inertia = rotorInertia + InertiaAroundJointAxis
       hrp::Vector3 cog_world = m_robot->joint(i)->submwc / m_robot->joint(i)->subm - m_robot->joint(i)->p;
-      double inertia = (m_robot->joint(i)->Ir + m_robot->joint(i)->subm) * cog_world.squaredNorm();
+      double inertia = m_robot->joint(i)->Ir + (m_robot->joint(i)->subm * cog_world.squaredNorm());
       inertia_torque[i] = inertia * m_robot->joint(i)->ddq;
     }
 
