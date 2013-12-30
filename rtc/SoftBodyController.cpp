@@ -52,6 +52,8 @@ SoftBodyController::SoftBodyController(RTC::Manager* manager)
   : RTC::DataFlowComponentBase(manager),
     // <rtc-template block="initializer">
     m_qCurrentIn("qCurrent", m_qCurrent),
+    m_tauIn("tau", m_tau),
+    m_TorqueControllerServicePort("TorqueControllerService"),
     // </rtc-template>
     m_debugLevel(1)
 {
@@ -74,17 +76,20 @@ RTC::ReturnCode_t SoftBodyController::onInitialize()
   // <rtc-template block="registration">
   // Set InPort buffers
   addInPort("qCurrent", m_qCurrentIn);
+  addInPort("tau", m_tauIn);
 
   // Set OutPort buffer
   
   // Set service provider to Ports
   
   // Set service consumers to Ports
+  m_TorqueControllerServicePort.registerConsumer("service0", "TorqueControllerService", m_TorqueControllerService0);
   
   // Set CORBA Service Ports
+  addPort(m_TorqueControllerServicePort);
   
   // </rtc-template>
-
+  
   RTC::Properties& prop = getProperties();
   coil::stringTo(m_dt, prop["dt"].c_str());
 
@@ -106,6 +111,32 @@ RTC::ReturnCode_t SoftBodyController::onInitialize()
     return RTC::RTC_ERROR;
   }
 
+  coil::vstring frictionParamsFromConf = coil::split(prop["friction_params"], ",");
+  m_frictionCoeffs.resize(m_robot->numJoints());
+  if (frictionParamsFromConf.size() == m_robot->numJoints()) {
+    for (int i = 0; i < m_robot->numJoints(); i++) {
+      coil::stringTo(m_frictionCoeffs[i], frictionParamsFromConf[i].c_str());
+    }
+  } else { // default
+    std::cerr << "[WARNING] friction params are not correct number, " << frictionParamsFromConf.size() << std::endl;
+    for (int i = 0; i < m_robot->numJoints(); i++) {
+      m_frictionCoeffs[i] = 0.01;
+    }
+  }
+
+  coil::vstring torqueMarginFromConf = coil::split(prop["torque_margin"], ",");
+  m_torqueMargin.resize(m_robot->numJoints());
+  if (torqueMarginFromConf.size() == m_robot->numJoints()) {
+    for (int i = 0; i < m_robot->numJoints(); i++) {
+      coil::stringTo(m_torqueMargin[i], torqueMarginFromConf[i].c_str());
+    }
+  } else { // default
+    std::cerr << "[WARNING] torque margin are not correct number, " << frictionParamsFromConf.size() << std::endl;
+    for (int i = 0; i < m_robot->numJoints(); i++) {
+      m_torqueMargin[i] = 5.0;
+    }
+  }
+  
   m_robot->initializeConfiguration();
   
   return RTC::RTC_OK;
@@ -157,13 +188,15 @@ RTC::ReturnCode_t SoftBodyController::onExecute(RTC::UniqueId ec_id)
   tm.sec = coiltm.sec();
   tm.nsec = coiltm.usec()*1000;
 
-  hrp::dvector dist_tau(m_robot->numJoints());
-  
   if (m_qCurrentIn.isNew()) {
     m_qCurrentIn.read();
   }
-
-  if ( m_qCurrent.data.length() ==  m_robot->numJoints() ) {
+  if (m_tauIn.isNew()) {
+    m_tauIn.read();
+  }
+  
+  if ( m_qCurrent.data.length() == m_robot->numJoints()
+       && m_tau.data.length() == m_robot->numJoints()) {
 
     // update joint angles
     hrp::dvector tmp_dq(m_robot->numJoints());
@@ -196,23 +229,28 @@ RTC::ReturnCode_t SoftBodyController::onExecute(RTC::UniqueId ec_id)
     }
 
     // update reference robot model
-    m_robot->calcForwardKinematics();
+    m_robot->calcForwardKinematics(true, true);
     m_robot->calcCM();
     m_robot->rootLink()->calcSubMassCM();
 
     // calc inertia
     hrp::dvector inertia_torque(m_robot->numJoints());
     for (int i = 0; i < m_robot->numJoints(); i++) {
-      // rotorInertia * ddq
-      inertia_torque[i] = m_robot->joint(i)->Ir * m_robot->joint(i)->ddq;
+      // tau = J * ddq
+      // inertia_torque[i] = m_robot->joint(i)->Ir * m_robot->joint(i)->ddq + inertiaTorque;
+
+      // inertia = rotorInertia + InertiaAroundJointAxis
+      hrp::Vector3 cog_world = m_robot->joint(i)->submwc / m_robot->joint(i)->subm - m_robot->joint(i)->p;
+      double inertia = (m_robot->joint(i)->Ir + m_robot->joint(i)->subm) * cog_world.squaredNorm();
+      inertia_torque[i] = inertia * m_robot->joint(i)->ddq;
     }
 
     // calc friction
-    // hrp::dvector friction_torque(m_robot->numJoints());
-    // for (int i = 0; i < m_robot->numJoints(); i++) {
-    //   // D * dq
-    //   friction_torque[i] =  * m_robot->joint(i)->dq;
-    // }
+    hrp::dvector friction_torque(m_robot->numJoints());
+    for (int i = 0; i < m_robot->numJoints(); i++) {
+      // B * dq
+      friction_torque[i] = m_frictionCoeffs[i] * m_robot->joint(i)->dq;
+    }
     
     // calc gravity compensation of each joints
     hrp::Vector3 g(0, 0, 9.8);
@@ -220,29 +258,55 @@ RTC::ReturnCode_t SoftBodyController::onExecute(RTC::UniqueId ec_id)
     for (int i = 0; i < m_robot->numJoints(); i++) {
       // (submwc/subm - p) x subm*g . R*a
       // subm: mass, g: gravity, submwc/subm: cog in worldcoords, p: pos in worldcoords, R: posture, a: axis in worldcoords
-      gravity_compensation[i] = (m_robot->joint(i)->submwc / m_robot->joint(i)->subm - m_robot->joint(i)->p).cross(m_robot->joint(i)->subm*g).dot(m_robot->joint(i)->R * m_robot->joint(i)->a);
+      // gravity_compensation[i] = (m_robot->joint(i)->submwc / m_robot->joint(i)->subm - m_robot->joint(i)->p).cross(m_robot->joint(i)->subm*g).dot(m_robot->joint(i)->R * m_robot->joint(i)->a);
+      hrp::Vector3 cog_world = (m_robot->joint(i)->submwc / m_robot->joint(i)->subm) - m_robot->joint(i)->p;
+      hrp::Vector3 mg = m_robot->joint(i)->subm*g;
+      hrp::Vector3 axis_world = m_robot->joint(i)->R * m_robot->joint(i)->a;
+      gravity_compensation[i] = (cog_world.cross(mg)).dot(axis_world);
     }
 
     // decide dist_tau
+    hrp::dvector dist_tau(m_robot->numJoints());
     for (int i = 0; i < m_robot->numJoints(); i++) {
-      dist_tau[i] = inertia_torque[i] + gravity_compensation[i];
+      dist_tau[i] = inertia_torque[i] + friction_torque[i] + gravity_compensation[i];
+    }
+
+    // consider torque margin
+    hrp::dvector actual_dist_tau(m_robot->numJoints());
+    for (int i = 0; i < m_robot->numJoints(); i++) {
+      if (std::abs(dist_tau[i] - m_tau.data[i]) < m_torqueMargin[i]){
+        actual_dist_tau[i] = m_tau.data[i];
+      } else {
+        actual_dist_tau[i] = dist_tau[i];
+      }
+      m_TorqueControllerService0->setReferenceTorque(m_robot->joint(i)->name.c_str(), actual_dist_tau[i]);
     }
     
     if ( DEBUGP ) {
       std::string prefix = "[SoftBodyController]";
-      std::cerr << prefix << "gravity:";
-      for (int i = 0; i < m_robot->numJoints(); i++) {
-        std::cerr << " " << gravity_compensation[i];
-      }
-      std::cerr << std::endl;
       std::cerr << prefix << "inertia:";
       for (int i = 0; i < m_robot->numJoints(); i++) {
         std::cerr << " " << inertia_torque[i];
       }
       std::cerr << std::endl;
+      std::cerr << prefix << "friction:";
+      for (int i = 0; i < m_robot->numJoints(); i++) {
+        std::cerr << " " << friction_torque[i];
+      }
+      std::cerr << std::endl;
+      std::cerr << prefix << "gravity:";
+      for (int i = 0; i < m_robot->numJoints(); i++) {
+        std::cerr << " " << gravity_compensation[i];
+      }
+      std::cerr << std::endl;
       std::cerr << prefix << "dist_tau:";
       for (int i = 0; i < m_robot->numJoints(); i++) {
         std::cerr << " " << dist_tau[i];
+      }
+      std::cerr << std::endl;
+      std::cerr << prefix << "actual_dist_tau:";
+      for (int i = 0; i < m_robot->numJoints(); i++) {
+        std::cerr << " " << actual_dist_tau[i];
       }
       std::cerr << std::endl;
     }

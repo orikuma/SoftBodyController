@@ -21,6 +21,8 @@
 #include <hrpModel/Link.h>
 #include <hrpModel/JointPath.h>
 
+#include "TorqueControllerService.hh"
+
 // Service implementation headers
 // <rtc-template block="service_impl_h">
 // #include "SoftBodyController_impl.h"
@@ -106,10 +108,12 @@ class SoftBodyController
   
   // </rtc-template>
   TimedDoubleSeq m_qCurrent;
+  TimedDoubleSeq m_tau;
 
   // DataInPort declaration
   // <rtc-template block="inport_declare">
   InPort<TimedDoubleSeq> m_qCurrentIn;
+  InPort<TimedDoubleSeq> m_tauIn;
   
   // </rtc-template>
 
@@ -126,20 +130,22 @@ class SoftBodyController
   // Service declaration
   // <rtc-template block="service_declare">
   //RTC::CorbaPort m_SoftBodyControllerServicePort;
-  
   // </rtc-template>
+  RTC::CorbaPort m_TorqueControllerServicePort;
 
   // Consumer declaration
-  // <rtc-template block="consumer_declare">
   //SoftBodyControllerService_impl m_SoftBodyControllerService;
-  
-  // </rtc-template>
+  RTC::CorbaConsumer<OpenHRP::TorqueControllerService> m_TorqueControllerService0;  
 
  private:
 
   double m_dt;
   hrp::BodyPtr m_robot;
   unsigned int m_debugLevel;
+
+  hrp::dvector m_frictionCoeffs;
+  hrp::dvector m_torqueMargin;
+  
 };
 
 
