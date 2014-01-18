@@ -14,6 +14,9 @@
 
 #define DEBUGP ((m_debugLevel==1 && loop%200==0) || m_debugLevel > 1 )
 
+#define DQ_MAX 0.1 // 5[deg]
+#define DDQ_MAX 0.1 // 5[deg/s]
+
 // Module specification
 // <rtc-template block="module_spec">
 static const char* softbodycontroller_spec[] =
@@ -183,6 +186,25 @@ RTC::ReturnCode_t SoftBodyController::onExecute(RTC::UniqueId ec_id)
   static int loop = 0;
   loop ++;
 
+  // if ( DEBUGP ) {
+  //   std::string prefix = "[SoftBodyController]";
+  //   std::cerr << prefix << "old_q:";
+  //   for (int i = 0; i < m_robot->numJoints(); i++) {
+  //     std::cerr << " " << m_robot->joint(i)->q;
+  //   }
+  //   std::cerr << std::endl;
+  //   std::cerr << prefix << "old_dq:";
+  //   for (int i = 0; i < m_robot->numJoints(); i++) {
+  //     std::cerr << " " << m_robot->joint(i)->dq;
+  //   }
+  //   std::cerr << std::endl;
+  //   std::cerr << prefix << "old_ddq:";
+  //   for (int i = 0; i < m_robot->numJoints(); i++) {
+  //     std::cerr << " " << m_robot->joint(i)->ddq;
+  //   }
+  //   std::cerr << std::endl;
+  // }
+  
   coil::TimeValue coiltm(coil::gettimeofday());
   RTC::Time tm;
   tm.sec = coiltm.sec();
@@ -197,7 +219,7 @@ RTC::ReturnCode_t SoftBodyController::onExecute(RTC::UniqueId ec_id)
   
   if ( m_qCurrent.data.length() == m_robot->numJoints()
        && m_tau.data.length() == m_robot->numJoints()) {
-
+    
     // update joint angles
     hrp::dvector tmp_dq(m_robot->numJoints());
     hrp::dvector tmp_ddq(m_robot->numJoints());
@@ -208,6 +230,11 @@ RTC::ReturnCode_t SoftBodyController::onExecute(RTC::UniqueId ec_id)
       m_robot->joint(i)->dq = tmp_dq[i];
       m_robot->joint(i)->ddq = tmp_ddq[i];
     }
+
+    // update reference robot model
+    m_robot->calcForwardKinematics();
+    m_robot->calcCM();
+    m_robot->rootLink()->calcSubMassCM();
 
     if ( DEBUGP ) {
       std::string prefix = "[SoftBodyController]";
@@ -228,19 +255,12 @@ RTC::ReturnCode_t SoftBodyController::onExecute(RTC::UniqueId ec_id)
       std::cerr << std::endl;
     }
 
-    // update reference robot model
-    m_robot->calcForwardKinematics(true, true);
-    m_robot->calcCM();
-    m_robot->rootLink()->calcSubMassCM();
-
     // calc inertia
     hrp::dvector inertia_torque(m_robot->numJoints());
     for (int i = 0; i < m_robot->numJoints(); i++) {
       // tau = J * ddq
-      // inertia_torque[i] = m_robot->joint(i)->Ir * m_robot->joint(i)->ddq + inertiaTorque;
-
       // inertia = rotorInertia + InertiaAroundJointAxis
-      hrp::Vector3 cog_world = m_robot->joint(i)->submwc / m_robot->joint(i)->subm - m_robot->joint(i)->p;
+      hrp::Vector3 cog_world = (m_robot->joint(i)->submwc / m_robot->joint(i)->subm) - m_robot->joint(i)->p;
       double inertia = m_robot->joint(i)->Ir + (m_robot->joint(i)->subm * cog_world.squaredNorm());
       inertia_torque[i] = inertia * m_robot->joint(i)->ddq;
     }
@@ -274,7 +294,7 @@ RTC::ReturnCode_t SoftBodyController::onExecute(RTC::UniqueId ec_id)
     // consider torque margin
     hrp::dvector actual_dist_tau(m_robot->numJoints());
     for (int i = 0; i < m_robot->numJoints(); i++) {
-      if (std::abs(dist_tau[i] - m_tau.data[i]) < m_torqueMargin[i]){
+      if (std::abs(dist_tau[i] - m_tau.data[i]) < m_torqueMargin[i]) {
         actual_dist_tau[i] = m_tau.data[i];
       } else {
         actual_dist_tau[i] = dist_tau[i];
@@ -310,6 +330,26 @@ RTC::ReturnCode_t SoftBodyController::onExecute(RTC::UniqueId ec_id)
       }
       std::cerr << std::endl;
     }
+
+    // if ( DEBUGP ) {
+    //   std::string prefix = "[SoftBodyController]";
+    //   std::cerr << prefix << "tmp_q:";
+    //   for (int i = 0; i < m_robot->numJoints(); i++) {
+    //     std::cerr << " " << m_robot->joint(i)->q;
+    //   }
+    //   std::cerr << std::endl;
+    //   std::cerr << prefix << "tmp_dq:";
+    //   for (int i = 0; i < m_robot->numJoints(); i++) {
+    //     std::cerr << " " << m_robot->joint(i)->dq;
+    //   }
+    //   std::cerr << std::endl;
+    //   std::cerr << prefix << "tmp_ddq:";
+    //   for (int i = 0; i < m_robot->numJoints(); i++) {
+    //     std::cerr << " " << m_robot->joint(i)->ddq;
+    //   }
+    //   std::cerr << std::endl;
+    // }
+
     
   }
   return RTC::RTC_OK;
