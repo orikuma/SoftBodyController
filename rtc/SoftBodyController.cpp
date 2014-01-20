@@ -141,6 +141,11 @@ RTC::ReturnCode_t SoftBodyController::onInitialize()
   }
   
   m_robot->initializeConfiguration();
+
+  // initialize temporary vector
+  m_calculated_q = hrp::dvector::Zero(m_robot->numJoints());
+  m_calculated_dq = hrp::dvector::Zero(m_robot->numJoints());
+  m_calculated_ddq = hrp::dvector::Zero(m_robot->numJoints());
   
   return RTC::RTC_OK;
 }
@@ -186,24 +191,7 @@ RTC::ReturnCode_t SoftBodyController::onExecute(RTC::UniqueId ec_id)
   static int loop = 0;
   loop ++;
 
-  // if ( DEBUGP ) {
-  //   std::string prefix = "[SoftBodyController]";
-  //   std::cerr << prefix << "old_q:";
-  //   for (int i = 0; i < m_robot->numJoints(); i++) {
-  //     std::cerr << " " << m_robot->joint(i)->q;
-  //   }
-  //   std::cerr << std::endl;
-  //   std::cerr << prefix << "old_dq:";
-  //   for (int i = 0; i < m_robot->numJoints(); i++) {
-  //     std::cerr << " " << m_robot->joint(i)->dq;
-  //   }
-  //   std::cerr << std::endl;
-  //   std::cerr << prefix << "old_ddq:";
-  //   for (int i = 0; i < m_robot->numJoints(); i++) {
-  //     std::cerr << " " << m_robot->joint(i)->ddq;
-  //   }
-  //   std::cerr << std::endl;
-  // }
+  const int send_dist_tau_cycle = 200;
   
   coil::TimeValue coiltm(coil::gettimeofday());
   RTC::Time tm;
@@ -219,18 +207,35 @@ RTC::ReturnCode_t SoftBodyController::onExecute(RTC::UniqueId ec_id)
   
   if ( m_qCurrent.data.length() == m_robot->numJoints()
        && m_tau.data.length() == m_robot->numJoints()) {
-    
-    // update joint angles
-    hrp::dvector tmp_dq(m_robot->numJoints());
-    hrp::dvector tmp_ddq(m_robot->numJoints());
-    for(int i = 0; i < m_robot->numJoints(); i++) {
-      tmp_dq[i] = (m_qCurrent.data[i] - m_robot->joint(i)->q) / m_dt;
-      tmp_ddq[i] = (tmp_dq[i] - m_robot->joint(i)->dq) / m_dt;
-      m_robot->joint(i)->q = m_qCurrent.data[i];
-      m_robot->joint(i)->dq = tmp_dq[i];
-      m_robot->joint(i)->ddq = tmp_ddq[i];
-    }
 
+    // if ( DEBUGP ) {
+    //   std::string prefix = "[SoftBodyController]";
+    //   std::cerr << prefix << "old_q:";
+    //   for (int i = 0; i < m_robot->numJoints(); i++) {
+    //     std::cerr << " " << m_calculated_q[i];
+    //   }
+    //   std::cerr << std::endl;
+    //   std::cerr << prefix << "old_dq:";
+    //   for (int i = 0; i < m_robot->numJoints(); i++) {
+    //     std::cerr << " " << m_calculated_dq[i];
+    //   }
+    //   std::cerr << std::endl;
+    //   std::cerr << prefix << "old_ddq:";
+    //   for (int i = 0; i < m_robot->numJoints(); i++) {
+    //     std::cerr << " " << m_calculated_ddq[i];
+    //   }
+    //   std::cerr << std::endl;
+    // }
+
+    double new_dq, new_ddq;
+    for(int i = 0; i < m_robot->numJoints(); i++) {
+      new_dq = (m_qCurrent.data[i] - m_calculated_q[i]) / m_dt;
+      new_ddq = (new_dq - m_calculated_dq[i]) / m_dt;
+      m_calculated_q[i] = m_qCurrent.data[i];
+      m_calculated_dq[i] = new_dq;
+      m_calculated_ddq[i] = new_ddq;
+    }
+    
     // update reference robot model
     m_robot->calcForwardKinematics();
     m_robot->calcCM();
@@ -240,17 +245,17 @@ RTC::ReturnCode_t SoftBodyController::onExecute(RTC::UniqueId ec_id)
       std::string prefix = "[SoftBodyController]";
       std::cerr << prefix << "q:";
       for (int i = 0; i < m_robot->numJoints(); i++) {
-        std::cerr << " " << m_robot->joint(i)->q;
+        std::cerr << " " << m_qCurrent.data[i];
       }
       std::cerr << std::endl;
       std::cerr << prefix << "dq:";
       for (int i = 0; i < m_robot->numJoints(); i++) {
-        std::cerr << " " << m_robot->joint(i)->dq;
+        std::cerr << " " << m_calculated_dq[i];
       }
       std::cerr << std::endl;
       std::cerr << prefix << "ddq:";
       for (int i = 0; i < m_robot->numJoints(); i++) {
-        std::cerr << " " << m_robot->joint(i)->ddq;
+        std::cerr << " " << m_calculated_ddq[i];
       }
       std::cerr << std::endl;
     }
@@ -262,14 +267,14 @@ RTC::ReturnCode_t SoftBodyController::onExecute(RTC::UniqueId ec_id)
       // inertia = rotorInertia + InertiaAroundJointAxis
       hrp::Vector3 cog_world = (m_robot->joint(i)->submwc / m_robot->joint(i)->subm) - m_robot->joint(i)->p;
       double inertia = m_robot->joint(i)->Ir + (m_robot->joint(i)->subm * cog_world.squaredNorm());
-      inertia_torque[i] = inertia * m_robot->joint(i)->ddq;
+      inertia_torque[i] = inertia * m_calculated_ddq[i];
     }
 
     // calc friction
     hrp::dvector friction_torque(m_robot->numJoints());
     for (int i = 0; i < m_robot->numJoints(); i++) {
       // B * dq
-      friction_torque[i] = m_frictionCoeffs[i] * m_robot->joint(i)->dq;
+      friction_torque[i] = m_frictionCoeffs[i] * m_calculated_dq[i];
     }
     
     // calc gravity compensation of each joints
@@ -299,7 +304,9 @@ RTC::ReturnCode_t SoftBodyController::onExecute(RTC::UniqueId ec_id)
       } else {
         actual_dist_tau[i] = dist_tau[i];
       }
-      m_TorqueControllerService0->setReferenceTorque(m_robot->joint(i)->name.c_str(), actual_dist_tau[i]);
+      if (!(loop % send_dist_tau_cycle)) {
+        m_TorqueControllerService0->setReferenceTorque(m_robot->joint(i)->name.c_str(), actual_dist_tau[i]);
+      }
     }
     
     if ( DEBUGP ) {
@@ -335,17 +342,17 @@ RTC::ReturnCode_t SoftBodyController::onExecute(RTC::UniqueId ec_id)
     //   std::string prefix = "[SoftBodyController]";
     //   std::cerr << prefix << "tmp_q:";
     //   for (int i = 0; i < m_robot->numJoints(); i++) {
-    //     std::cerr << " " << m_robot->joint(i)->q;
+    //     std::cerr << " " << m_calculated_q[i];
     //   }
     //   std::cerr << std::endl;
     //   std::cerr << prefix << "tmp_dq:";
     //   for (int i = 0; i < m_robot->numJoints(); i++) {
-    //     std::cerr << " " << m_robot->joint(i)->dq;
+    //     std::cerr << " " << m_calculated_dq[i];
     //   }
     //   std::cerr << std::endl;
     //   std::cerr << prefix << "tmp_ddq:";
     //   for (int i = 0; i < m_robot->numJoints(); i++) {
-    //     std::cerr << " " << m_robot->joint(i)->ddq;
+    //     std::cerr << " " << m_calculated_ddq[i];
     //   }
     //   std::cerr << std::endl;
     // }

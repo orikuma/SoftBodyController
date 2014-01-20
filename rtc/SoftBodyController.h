@@ -145,7 +145,10 @@ class SoftBodyController
 
   hrp::dvector m_frictionCoeffs;
   hrp::dvector m_torqueMargin;
-  
+
+  hrp::dvector m_calculated_q;
+  hrp::dvector m_calculated_dq;
+  hrp::dvector m_calculated_ddq;
 };
 
 
